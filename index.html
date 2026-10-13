@@ -1,0 +1,1556 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>薯饼的审核大厅</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        cream: '#FFF9F5',
+                        strawberry: '#F4DDE5',
+                        rose: '#EBC8D4',
+                        oat: '#E8E0DB',
+                        smog: '#CDBBC0',
+                        mint: '#DCE8DA',
+                        brown: '#65575A'
+                    },
+                    boxShadow: {
+                        'soft': '0 8px 24px rgba(244, 221, 229, 0.4)'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        :root {
+            --color-cream: #FFF9F5;
+            --color-strawberry: #F4DDE5;
+            --color-rose: #EBC8D4;
+            --color-oat: #E8E0DB;
+            --color-smog: #CDBBC0;
+            --color-mint: #DCE8DA;
+            --color-brown: #65575A;
+        }
+
+        body {
+            background-image: radial-gradient(var(--color-strawberry) 1px, transparent 1px);
+            background-size: 20px 20px;
+            background-color: var(--color-cream);
+            color: var(--color-brown);
+        }
+
+        ::-webkit-scrollbar {
+            width: 0px;
+            background: transparent;
+        }
+
+        .dashed-divider {
+            border-top: 2px dashed var(--color-rose);
+            margin: 1rem 0;
+            opacity: 0.6;
+        }
+
+        .btn-press:active {
+            transform: scale(0.97);
+        }
+
+        .card-soft {
+            background: #FFFFFF;
+            border: 2px solid var(--color-strawberry);
+            border-radius: 24px;
+            box-shadow: 0 4px 16px rgba(235, 200, 212, 0.2);
+        }
+
+        .input-soft {
+            background: var(--color-cream);
+            border: 2px solid var(--color-oat);
+            border-radius: 16px;
+            color: var(--color-brown);
+            transition: all 0.3s ease;
+        }
+
+        .input-soft:focus {
+            outline: none;
+            border-color: var(--color-rose);
+            box-shadow: 0 0 0 4px rgba(244, 221, 229, 0.3);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.35s ease-out forwards;
+        }
+
+        .zoom-target {
+            touch-action: none;
+            user-select: none;
+            transition: transform 0.05s ease-out;
+            transform-origin: center center;
+        }
+    </style>
+</head>
+<body class="antialiased min-h-screen">
+    <div id="app" class="max-w-[430px] mx-auto min-h-screen bg-white/50 backdrop-blur-sm shadow-soft relative overflow-hidden pb-12">
+        <component :is="currentPageComponent" @navigate="navigate" :route-params="routeParams"></component>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, computed } = Vue;
+
+        const getDeviceType = () => {
+            const ua = navigator.userAgent;
+            if (/iPad|iPhone|iPod/.test(ua)) return 'ios';
+            if (/android/i.test(ua)) return 'android';
+            return 'unknown';
+        };
+
+        class AudioRecorder {
+            constructor() {
+                this.mediaRecorder = null;
+                this.audioChunks = [];
+            }
+            async start() {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                this.mediaRecorder = new MediaRecorder(stream);
+                this.audioChunks = [];
+                this.mediaRecorder.ondataavailable = event => this.audioChunks.push(event.data);
+                this.mediaRecorder.start();
+            }
+            stop() {
+                return new Promise((resolve) => {
+                    this.mediaRecorder.onstop = () => {
+                        const audioBlob = new Blob(this.audioChunks, { type: 'audio/mp4' });
+                        const audioUrl = URL.createObjectURL(audioBlob);
+                        this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                        resolve({ blob: audioBlob, url: audioUrl });
+                    };
+                    this.mediaRecorder.stop();
+                });
+            }
+        }
+
+        const STORAGE_KEY = 'shubing_mock_db';
+        const REVIEWERS_KEY = 'shubing_reviewers_db';
+        const INVITES_KEY = 'shubing_invites_v3_db';
+        const QUICK_COMMENTS_KEY = 'shubing_quick_comments_db';
+        const SESSION_KEY = 'shubing_active_session';
+        const SUPER_ADMIN_QQ = '703608437';
+        const SUPER_ADMIN_PWD_HASH = 'xysz000602';
+        const RETENTION_MS = 24 * 60 * 60 * 1000;
+
+        const DEFAULT_QUICK_COMMENTS = [
+            '材料齐全完整，予以通过。',
+            '未在同屏中清晰露出支付宝年龄/性别信息，请重新上传。',
+            '未露出QQ主页信息与号码，请完整同屏截屏。',
+            '语音内容不完整或存在嘈杂杂音，请重新录制。',
+            '缺少必要位置信息，请严格对照同屏规范提交。'
+        ];
+
+        const initStorage = () => {
+            if (!localStorage.getItem(INVITES_KEY)) {
+                const initialInvites = [
+                    { code: 'SHUBING2026', targetQQ: '', total: 10, used: 0, usedBy: [], note: '公开备用码' }
+                ];
+                localStorage.setItem(INVITES_KEY, JSON.stringify(initialInvites));
+            }
+            if (!localStorage.getItem(QUICK_COMMENTS_KEY)) {
+                localStorage.setItem(QUICK_COMMENTS_KEY, JSON.stringify(DEFAULT_QUICK_COMMENTS));
+            }
+            let reviewers = JSON.parse(localStorage.getItem(REVIEWERS_KEY) || '[]');
+            const superAdminIndex = reviewers.findIndex(r => r.qq === SUPER_ADMIN_QQ);
+            if (superAdminIndex === -1) {
+                reviewers.push({
+                    qq: SUPER_ADMIN_QQ,
+                    password: SUPER_ADMIN_PWD_HASH,
+                    role: 'super_admin',
+                    name: '最高管理员',
+                    status: 'active',
+                    createdAt: new Date().toLocaleString()
+                });
+            } else {
+                reviewers[superAdminIndex].role = 'super_admin';
+                reviewers[superAdminIndex].status = 'active';
+            }
+            localStorage.setItem(REVIEWERS_KEY, JSON.stringify(reviewers));
+        };
+        initStorage();
+
+        const pruneExpiredApplications = () => {
+            let db = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            const now = Date.now();
+            const filtered = db.filter(item => {
+                if (item.status === 'pending') return true;
+                if (!item.reviewedTimestamp) return true;
+                return (now - item.reviewedTimestamp) < RETENTION_MS;
+            });
+            if (filtered.length !== db.length) {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
+            }
+            return filtered;
+        };
+
+        const saveMockApplication = (data) => {
+            let db = pruneExpiredApplications();
+            db = db.filter(app => app.qq !== data.qq);
+            db.push(data);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+        };
+
+        const getMockApplication = (qq) => {
+            const db = pruneExpiredApplications();
+            return db.reverse().find(app => app.qq === qq) || null;
+        };
+
+        const getAllMockApplications = () => {
+            return pruneExpiredApplications().reverse();
+        };
+
+        const updateMockApplicationStatus = (qq, status, comment, reviewerQq, reviewerName) => {
+            let db = pruneExpiredApplications();
+            const index = db.findIndex(app => app.qq === qq);
+            if (index !== -1) {
+                db[index].status = status;
+                db[index].reviewerComment = comment;
+                db[index].reviewedBy = reviewerQq;
+                db[index].reviewedByName = reviewerName || '管理员';
+                db[index].updateTime = new Date().toLocaleString();
+                db[index].reviewedTimestamp = Date.now();
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+            }
+        };
+
+        const deleteMockApplicationPermanently = (qq) => {
+            let db = pruneExpiredApplications();
+            db = db.filter(app => app.qq !== qq);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+        };
+
+        const AuthService = {
+            getCurrentUser() {
+                return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+            },
+            setCurrentUser(user) {
+                localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+            },
+            logout() {
+                localStorage.removeItem(SESSION_KEY);
+            },
+            getReviewers() {
+                return JSON.parse(localStorage.getItem(REVIEWERS_KEY) || '[]');
+            },
+            saveReviewers(list) {
+                localStorage.setItem(REVIEWERS_KEY, JSON.stringify(list));
+            },
+            getInvites() {
+                return JSON.parse(localStorage.getItem(INVITES_KEY) || '[]');
+            },
+            saveInvites(list) {
+                localStorage.setItem(INVITES_KEY, JSON.stringify(list));
+            },
+            getQuickComments() {
+                return JSON.parse(localStorage.getItem(QUICK_COMMENTS_KEY) || '[]');
+            },
+            saveQuickComments(list) {
+                localStorage.setItem(QUICK_COMMENTS_KEY, JSON.stringify(list));
+            },
+            updateNickname(qq, newName) {
+                const list = this.getReviewers();
+                const idx = list.findIndex(r => r.qq === qq);
+                if (idx !== -1) {
+                    list[idx].name = newName.trim();
+                    this.saveReviewers(list);
+                    const current = this.getCurrentUser();
+                    if (current && current.qq === qq) {
+                        current.name = newName.trim();
+                        this.setCurrentUser(current);
+                    }
+                    return true;
+                }
+                return false;
+            },
+            login(qq, password) {
+                const reviewers = this.getReviewers();
+                const matched = reviewers.find(r => r.qq === qq);
+                if (!matched) return { success: false, msg: '账号未注册' };
+                if (matched.status === 'banned') return { success: false, msg: '该账号已被停用' };
+                if (qq === SUPER_ADMIN_QQ) {
+                    if (password !== SUPER_ADMIN_PWD_HASH && password !== matched.password) {
+                        return { success: false, msg: '管理密码错误' };
+                    }
+                    matched.role = 'super_admin';
+                    this.setCurrentUser(matched);
+                    return { success: true, user: matched };
+                }
+                if (matched.password !== password) return { success: false, msg: '密码错误' };
+                this.setCurrentUser(matched);
+                return { success: true, user: matched };
+            },
+            register(qq, password, inviteCode, nickname) {
+                const reviewers = this.getReviewers();
+                if (reviewers.some(r => r.qq === qq)) {
+                    return { success: false, msg: '该 QQ 号已注册过审核员账号' };
+                }
+                const isSuper = (qq === SUPER_ADMIN_QQ);
+                const targetCode = inviteCode.trim().toUpperCase();
+
+                if (!isSuper) {
+                    const invites = this.getInvites();
+                    const inviteIndex = invites.findIndex(inv => inv.code === targetCode);
+                    if (inviteIndex === -1) {
+                        return { success: false, msg: '激活码无效或不存在' };
+                    }
+                    const item = invites[inviteIndex];
+                    if (item.targetQQ && item.targetQQ.trim() !== '' && item.targetQQ.trim() !== qq) {
+                        return { success: false, msg: '该激活码已被指定给专属账号，当前 QQ 无法使用' };
+                    }
+                    if (item.used >= item.total) {
+                        return { success: false, msg: '该激活码使用次数已达上限' };
+                    }
+                    item.used += 1;
+                    item.usedBy.push({ qq, time: new Date().toLocaleString() });
+                    invites[inviteIndex] = item;
+                    this.saveInvites(invites);
+                }
+
+                const finalName = nickname?.trim() || (isSuper ? '最高管理员' : `审核员_${qq.slice(-4)}`);
+                const newUser = {
+                    qq,
+                    password: isSuper ? SUPER_ADMIN_PWD_HASH : password,
+                    role: isSuper ? 'super_admin' : 'reviewer',
+                    name: finalName,
+                    status: 'active',
+                    createdAt: new Date().toLocaleString()
+                };
+                reviewers.push(newUser);
+                this.saveReviewers(reviewers);
+                this.setCurrentUser(newUser);
+                return { success: true, user: newUser };
+            }
+        };
+
+        const PotatoMascot = {
+            template: `
+                <div class="flex flex-col items-center justify-center my-6">
+                    <svg width="120" height="120" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect x="30" y="40" width="140" height="110" rx="40" fill="#E8E0DB" stroke="#CDBBC0" stroke-width="6"/>
+                        <circle cx="60" cy="100" r="12" fill="#F4DDE5"/>
+                        <circle cx="140" cy="100" r="12" fill="#F4DDE5"/>
+                        <circle cx="75" cy="80" r="6" fill="#65575A"/>
+                        <circle cx="125" cy="80" r="6" fill="#65575A"/>
+                        <path d="M90 95 Q100 105 110 95" stroke="#65575A" stroke-width="5" stroke-linecap="round" fill="none"/>
+                        <path d="M90 35 L70 20 L70 50 Z" fill="#EBC8D4"/>
+                        <path d="M110 35 L130 20 L130 50 Z" fill="#EBC8D4"/>
+                        <circle cx="100" cy="35" r="8" fill="#F4DDE5" stroke="#CDBBC0" stroke-width="2"/>
+                    </svg>
+                    <div class="mt-2 text-[10px] text-smog tracking-widest font-bold uppercase">Shubing's Little Review Room</div>
+                </div>
+            `
+        };
+
+        const PageHome = {
+            components: { PotatoMascot },
+            template: `
+                <div class="p-6 animate-fade-in">
+                    <PotatoMascot />
+                    <h1 class="text-2xl font-bold text-center mb-2 mt-4">薯饼的审核大厅</h1>
+                    <p class="text-center text-sm text-smog mb-8">欢迎光临，请准备好材料后开始哦 ♡</p>
+                    
+                    <div class="card-soft p-5 mb-6 relative overflow-hidden">
+                        <div class="absolute -top-3 -right-3 w-12 h-12 bg-mint rounded-full opacity-20"></div>
+                        <h2 class="font-bold text-lg mb-2 flex items-center gap-2">
+                            <span class="text-rose">✦</span> 审核公告
+                        </h2>
+                        <p class="text-sm leading-relaxed mb-3 opacity-80">
+                            支持安卓与iOS端独立提交流程。材料经审核后24小时自动销毁，全流程确保隐私安全。
+                        </p>
+                        <div class="dashed-divider"></div>
+                        <button @click="$emit('navigate', 'requirements')" class="text-rose text-sm font-bold hover:opacity-80 flex items-center justify-between w-full">
+                            <span>阅读详细审核须知</span>
+                            <span>→</span>
+                        </button>
+                    </div>
+
+                    <div class="flex flex-col gap-4">
+                        <button @click="$emit('navigate', 'submit')" class="w-full bg-strawberry font-bold py-4 rounded-2xl btn-press shadow-md shadow-strawberry/50">
+                            开始提交审核
+                        </button>
+                        <button @click="$emit('navigate', 'query')" class="w-full bg-oat font-bold py-4 rounded-2xl btn-press">
+                            查询审核进度
+                        </button>
+                        <button @click="$emit('navigate', 'admin')" class="w-full bg-white border-2 border-dashed border-smog text-smog font-bold py-3 rounded-2xl btn-press mt-4 text-sm">
+                            审核员登录 / 工作台
+                        </button>
+                    </div>
+                </div>
+            `
+        };
+
+        const PageRequirements = {
+            template: `
+                <div class="min-h-screen flex flex-col p-6 animate-fade-in">
+                    <button @click="$emit('navigate', 'home')" class="text-smog mb-4 font-bold text-left">← 返回</button>
+                    <h1 class="text-xl font-bold mb-6">各位大人们，以下是审核要求:</h1>
+                    
+                    <div class="card-soft p-5 mb-4">
+                        <div class="inline-block bg-strawberry text-xs px-2 py-1 rounded mb-3 font-bold">第一项</div>
+                        <h3 class="font-bold mb-2">身份材料</h3>
+                        <div class="text-sm leading-relaxed space-y-3">
+                            <p>自己zfb的页面（只需要露出性别和年龄）与自己qq号主页同屏的截屏（安卓）/录屏（ios）</p>
+                            <p class="text-xs text-rose font-bold bg-rose/10 p-2 rounded">隐私保障：除了必要信息外，其余个人隐私信息均可自行打码！</p>
+                        </div>
+                    </div>
+
+                    <div class="card-soft p-5 mb-8">
+                        <div class="inline-block bg-strawberry text-xs px-2 py-1 rounded mb-3 font-bold">第二项</div>
+                        <h3 class="font-bold mb-2">语音证明</h3>
+                        <p class="text-sm text-smog mb-3">发送一个语音条来证明自己是女生，内容如下：</p>
+                        <div class="bg-cream p-4 rounded-xl border border-oat text-sm leading-relaxed font-medium">
+                            「本人的qq号为xx，确认当前为xx年xx月xx日，北京时间xx点xx分。<br>我承诺不会二次传播饭堂内任何内容，如若违反群规，自愿接受薯饼执行的避雷、移出群聊等对应处置。」
+                        </div>
+                    </div>
+
+                    <p class="text-xs text-smog text-center mb-6 px-4">隐私提示：您提交的材料仅用于身份核验，材料经审核后24小时自动销毁。</p>
+                    
+                    <button @click="$emit('navigate', 'submit')" class="mt-auto w-full bg-strawberry font-bold py-4 rounded-2xl btn-press shadow-md shadow-strawberry/50">
+                        我已经准备好了，去提交
+                    </button>
+                </div>
+            `
+        };
+
+        // --- 提交材料（多图上传 + 打码说明） ---
+        const PageSubmit = {
+            setup(props, { emit }) {
+                const step = ref(1);
+                const qqNumber = ref('');
+                const device = ref('');
+                const fileList = ref([]); // 支持多文件上传 [{ url, type, name }]
+                const audioUrl = ref('');
+                const isRecording = ref(false);
+                const isSubmitting = ref(false);
+                const recorder = new AudioRecorder();
+                
+                const agreedRule = ref(false);
+                const agreedDestroy = ref(false);
+
+                onMounted(() => {
+                    device.value = getDeviceType();
+                    if (device.value === 'unknown') device.value = 'android';
+                });
+
+                const handleMultipleFiles = (e) => {
+                    const files = e.target.files;
+                    if (!files || files.length === 0) return;
+                    for (let i = 0; i < files.length; i++) {
+                        const file = files[i];
+                        fileList.value.push({
+                            url: URL.createObjectURL(file),
+                            type: file.type.startsWith('video') ? 'video' : 'image',
+                            name: file.name
+                        });
+                    }
+                    e.target.value = ''; // 允许重复添加同一张图
+                };
+
+                const removeFile = (index) => {
+                    fileList.value.splice(index, 1);
+                };
+
+                const toggleRecording = async () => {
+                    if (!isRecording.value) {
+                        try {
+                            await recorder.start();
+                            isRecording.value = true;
+                        } catch (err) {
+                            alert('无法获取麦克风权限。请选择本地音频文件。');
+                        }
+                    } else {
+                        const { url } = await recorder.stop();
+                        isRecording.value = false;
+                        audioUrl.value = url;
+                    }
+                };
+
+                const handleAudioUpload = (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    audioUrl.value = URL.createObjectURL(file);
+                };
+
+                const nextStep = () => {
+                    if (step.value === 1 && !qqNumber.value.trim()) {
+                        alert('请先填写您的QQ号哦 ♡');
+                        return;
+                    }
+                    if (step.value === 2 && fileList.value.length === 0) {
+                        alert('请至少上传一张身份材料截屏或录屏');
+                        return;
+                    }
+                    step.value++;
+                };
+
+                const mockSubmit = () => {
+                    if (!agreedRule.value || !agreedDestroy.value) return alert('请勾选同意所有确认条款。');
+                    isSubmitting.value = true;
+
+                    setTimeout(() => {
+                        isSubmitting.value = false;
+                        saveMockApplication({
+                            qq: qqNumber.value.trim(),
+                            status: 'pending',
+                            submitTime: new Date().toLocaleString(),
+                            updateTime: new Date().toLocaleString(),
+                            device: device.value,
+                            fileList: fileList.value, // 存入完整多图阵列
+                            audioUrl: audioUrl.value,
+                            reviewerComment: '',
+                            reviewedBy: '',
+                            reviewedByName: ''
+                        });
+                        emit('navigate', 'success', { qq: qqNumber.value.trim() });
+                    }, 1200);
+                };
+
+                return { 
+                    step, qqNumber, device, fileList, audioUrl, isRecording, isSubmitting, 
+                    agreedRule, agreedDestroy, handleMultipleFiles, removeFile, 
+                    toggleRecording, handleAudioUpload, nextStep, mockSubmit 
+                };
+            },
+            template: `
+                <div class="p-6 h-screen flex flex-col">
+                    <div class="flex items-center justify-between mb-8">
+                        <button @click="step > 1 ? step-- : $emit('navigate', 'home')" class="text-smog font-bold">← 返回</button>
+                        <div class="flex gap-1">
+                            <div v-for="i in 4" :key="i" class="w-4 h-1.5 rounded-full transition-colors" :class="step >= i ? 'bg-rose' : 'bg-oat'"></div>
+                        </div>
+                    </div>
+
+                    <div class="flex-1 overflow-y-auto pb-10">
+                        <div v-if="step === 1" class="animate-fade-in">
+                            <h2 class="text-xl font-bold mb-2">填写基本信息</h2>
+                            <p class="text-sm text-smog mb-6">请填写您的QQ号并确认设备类型。</p>
+                            
+                            <div class="mb-6">
+                                <label class="block text-sm font-bold text-brown mb-2 pl-2">您的 QQ 号 <span class="text-rose">*</span></label>
+                                <input type="tel" v-model="qqNumber" class="w-full input-soft px-4 py-3 font-mono" placeholder="填写的QQ号将作为查询进度的唯一凭证">
+                            </div>
+
+                            <div class="space-y-4">
+                                <label class="card-soft p-4 flex items-center gap-3 cursor-pointer" :class="device==='android' ? 'border-rose bg-rose/10' : ''">
+                                    <input type="radio" v-model="device" value="android" class="hidden">
+                                    <div class="w-5 h-5 rounded-full border-2 border-rose flex items-center justify-center">
+                                        <div v-if="device==='android'" class="w-3 h-3 bg-rose rounded-full"></div>
+                                    </div>
+                                    <span class="font-bold">安卓设备 (提交截屏)</span>
+                                </label>
+                                <label class="card-soft p-4 flex items-center gap-3 cursor-pointer" :class="device==='ios' ? 'border-rose bg-rose/10' : ''">
+                                    <input type="radio" v-model="device" value="ios" class="hidden">
+                                    <div class="w-5 h-5 rounded-full border-2 border-rose flex items-center justify-center">
+                                        <div v-if="device==='ios'" class="w-3 h-3 bg-rose rounded-full"></div>
+                                    </div>
+                                    <span class="font-bold">iOS设备 (提交录屏)</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- 步骤2：支持多图上传并明确打码提示 -->
+                        <div v-if="step === 2" class="animate-fade-in">
+                            <h2 class="text-xl font-bold mb-2">上传身份材料</h2>
+                            
+                            <div class="card-soft p-4 mb-4 border-l-4 border-l-rose">
+                                <div class="font-bold text-sm text-brown mb-2">📋 材料规范与隐私提示</div>
+                                <div class="text-xs space-y-1.5 text-smog leading-relaxed">
+                                    <p class="flex items-start gap-1.5"><span class="text-rose font-bold">1.</span> 必须同屏显示两个软件界面。</p>
+                                    <p class="flex items-start gap-1.5"><span class="text-rose font-bold">2.</span> 支付宝界面必须露显“性别”与“年龄”。</p>
+                                    <p class="flex items-start gap-1.5"><span class="text-rose font-bold">3.</span> QQ界面必须露出本人主页的“QQ号”与资料。</p>
+                                    <div class="mt-2 text-rose font-bold text-xs bg-rose/10 p-2.5 rounded-xl border border-rose/30">
+                                        🔒 除了必要信息外，其余信息均可自行打码遮盖！支持分屏多张上传。
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 多文件列表预览 -->
+                            <div v-if="fileList.length > 0" class="grid grid-cols-2 gap-3 mb-4">
+                                <div v-for="(file, idx) in fileList" :key="idx" class="relative bg-white border border-rose/30 rounded-xl p-2 shadow-sm flex flex-col items-center">
+                                    <button @click="removeFile(idx)" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 text-xs font-bold flex items-center justify-center shadow">×</button>
+                                    <img v-if="file.type === 'image'" :src="file.url" class="h-28 object-contain rounded">
+                                    <video v-else-if="file.type === 'video'" :src="file.url" class="h-28 w-full object-contain rounded"></video>
+                                    <div class="text-[10px] text-gray-400 mt-1 truncate w-full text-center">图 {{ idx + 1 }}</div>
+                                </div>
+                            </div>
+                            
+                            <!-- 上传触发器（支持多选） -->
+                            <div class="border-2 border-dashed border-rose rounded-3xl p-6 text-center bg-cream mb-4 relative flex flex-col items-center justify-center cursor-pointer hover:bg-strawberry/20 transition">
+                                <input type="file" multiple @change="handleMultipleFiles" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" :accept="device === 'ios' ? 'video/*,image/*' : 'image/*'">
+                                <div class="text-3xl mb-1 text-rose">➕</div>
+                                <p class="font-bold text-sm text-brown">点击添加材料图片 / 录屏</p>
+                                <p class="text-[10px] text-smog mt-0.5">支持同时选择或多次添加多张</p>
+                            </div>
+                        </div>
+
+                        <div v-if="step === 3" class="animate-fade-in">
+                            <h2 class="text-xl font-bold mb-2">提供语音证明</h2>
+                            <p class="text-sm text-smog mb-4">发送一个语音条来证明自己是女生，朗读以下内容：</p>
+
+                            <div class="bg-white p-4 rounded-xl border-2 border-rose/30 text-sm leading-relaxed font-medium mb-6 relative shadow-sm">
+                                <div class="absolute -top-3 -right-2 text-2xl">🎤</div>
+                                「本人的qq号为<span class="text-rose font-bold border-b-2 border-rose border-dotted">{{ qqNumber }}</span>，确认当前为<span class="text-rose font-bold border-b-2 border-rose border-dotted">xx</span>年<span class="text-rose font-bold border-b-2 border-rose border-dotted">xx</span>月<span class="text-rose font-bold border-b-2 border-rose border-dotted">xx</span>日，北京时间<span class="text-rose font-bold border-b-2 border-rose border-dotted">xx</span>点<span class="text-rose font-bold border-b-2 border-rose border-dotted">xx</span>分。我承诺不会二次传播饭堂内任何内容，如若违反群规，自愿接受薯饼执行的避雷、移出群聊等对应处置。」
+                            </div>
+
+                            <div class="card-soft p-6 text-center space-y-4">
+                                <button @click="toggleRecording" class="w-16 h-16 rounded-full border-4 flex items-center justify-center mx-auto transition-colors" :class="isRecording ? 'border-red-400 bg-red-100' : 'border-strawberry bg-cream'">
+                                    <div class="w-6 h-6 rounded" :class="isRecording ? 'bg-red-400 rounded-sm' : 'bg-rose rounded-full'"></div>
+                                </button>
+                                <p class="text-sm font-bold" :class="isRecording ? 'text-red-400 animate-pulse' : 'text-smog'">{{ isRecording ? '正在录音... 点击停止' : '点击开始录音' }}</p>
+                            </div>
+
+                            <div class="text-center my-4 text-sm text-smog">或</div>
+
+                            <div class="relative w-full">
+                                <input type="file" accept="audio/*" @change="handleAudioUpload" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
+                                <button class="w-full bg-oat/50 py-3 rounded-xl font-bold text-sm pointer-events-none text-brown">选择本地音频文件</button>
+                            </div>
+
+                            <div v-if="audioUrl" class="mt-6 p-4 bg-mint/20 rounded-2xl border border-mint">
+                                <p class="text-xs mb-2 font-bold text-brown">试听录音：</p>
+                                <audio :src="audioUrl" controls class="w-full h-10"></audio>
+                            </div>
+                        </div>
+
+                        <div v-if="step === 4" class="animate-fade-in">
+                            <h2 class="text-xl font-bold mb-6">最后确认</h2>
+                            
+                            <div class="card-soft p-5 space-y-4 mb-6">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-sm font-bold text-smog">申请 QQ</span>
+                                    <span class="text-sm font-bold text-rose">{{ qqNumber }}</span>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-sm font-bold text-smog">设备类型</span>
+                                    <span class="text-sm font-bold">{{ device === 'ios' ? 'iOS' : '安卓' }}</span>
+                                </div>
+                                <div class="dashed-divider"></div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-sm font-bold text-smog">材料图片数</span>
+                                    <span class="text-xs bg-mint/30 text-emerald-700 px-2 py-1 rounded font-bold">已就绪 ({{ fileList.length }} 份)</span>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-sm font-bold text-smog">语音材料</span>
+                                    <span class="text-xs bg-mint/30 text-emerald-700 px-2 py-1 rounded font-bold">{{ audioUrl ? '已就绪' : '缺失' }}</span>
+                                </div>
+                            </div>
+
+                            <label class="flex items-start gap-3 mb-3 cursor-pointer">
+                                <input type="checkbox" v-model="agreedRule" class="mt-1 w-4 h-4 text-rose bg-cream border-oat rounded">
+                                <span class="text-sm leading-tight">我确认已阅读审核须知，并自愿接受相关群规处置。</span>
+                            </label>
+                            <label class="flex items-start gap-3 cursor-pointer">
+                                <input type="checkbox" v-model="agreedDestroy" class="mt-1 w-4 h-4 text-rose bg-cream border-oat rounded">
+                                <span class="text-sm leading-tight text-smog font-bold text-brown">材料经审核后24小时自动销毁。</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="mt-auto pt-4 pb-safe bg-cream/90 backdrop-blur">
+                        <button v-if="step < 4" @click="nextStep" class="w-full bg-strawberry font-bold py-4 rounded-2xl btn-press shadow-md shadow-strawberry/50" :class="{'opacity-50': (step===1 && !qqNumber) || (step===2 && fileList.length===0)}">下一步</button>
+                        <!-- 文案更新：提交审批中... -->
+                        <button v-else @click="mockSubmit" class="w-full bg-rose text-white font-bold py-4 rounded-2xl btn-press shadow-md shadow-rose/50 relative">
+                            <span v-if="!isSubmitting">模拟提交申请</span>
+                            <span v-else class="animate-pulse">提交审批中...</span>
+                        </button>
+                    </div>
+                </div>
+            `
+        };
+
+        const PageSuccess = {
+            props: ['routeParams'],
+            template: `
+                <div class="p-6 min-h-screen flex flex-col items-center justify-center animate-fade-in">
+                    <div class="w-20 h-20 bg-mint rounded-full flex items-center justify-center text-4xl mb-6 shadow-soft shadow-mint/40">✨</div>
+                    <h1 class="text-2xl font-bold mb-2">演示提交成功</h1>
+                    <p class="text-sm text-smog text-center mb-8">材料已送达后台队列，审核员可立即查看。<br>请使用您的 QQ 号查询进度。</p>
+
+                    <div class="w-full card-soft p-5 bg-cream/50 mb-8 border-dashed text-center">
+                        <div class="text-xs font-bold text-smog mb-1">查询账号 (QQ)</div>
+                        <div class="text-xl font-bold text-rose select-all tracking-wider">{{ routeParams.qq }}</div>
+                    </div>
+
+                    <button @click="$emit('navigate', 'query', { qq: routeParams.qq })" class="w-full bg-strawberry font-bold py-4 rounded-2xl btn-press shadow-md mb-4">
+                        立即查询进度
+                    </button>
+                    <button @click="$emit('navigate', 'home')" class="text-sm font-bold text-smog">
+                        返回大厅首页
+                    </button>
+                </div>
+            `
+        };
+
+        // --- 进度查询（文案更新为“查询进度”） ---
+        const PageQuery = {
+            props: ['routeParams'],
+            setup(props) {
+                const queryQQ = ref(props.routeParams?.qq || '');
+                const result = ref(null);
+                const errorMsg = ref('');
+
+                const handleQuery = () => {
+                    errorMsg.value = '';
+                    if (!queryQQ.value) {
+                        errorMsg.value = '大人们，需要输入QQ号才能查询哦。';
+                        return;
+                    }
+                    const data = getMockApplication(queryQQ.value.trim());
+                    if (data) {
+                        result.value = data;
+                    } else {
+                        result.value = null;
+                        errorMsg.value = '未找到对应的申请记录（已过24小时销毁或未曾提交）。';
+                    }
+                };
+
+                onMounted(() => {
+                    if (queryQQ.value) handleQuery();
+                });
+
+                return { queryQQ, result, errorMsg, handleQuery };
+            },
+            template: `
+                <div class="p-6 min-h-screen flex flex-col">
+                    <button @click="$emit('navigate', 'home')" class="text-smog font-bold mb-6 text-left">← 返回大厅</button>
+                    <h1 class="text-xl font-bold mb-6">审核进度查询</h1>
+
+                    <div class="space-y-4 mb-8">
+                        <div>
+                            <label class="block text-sm font-bold text-smog mb-2 pl-2">提交时填写的 QQ 号</label>
+                            <input type="tel" v-model="queryQQ" class="w-full input-soft px-4 py-3 font-mono" placeholder="请输入QQ号">
+                        </div>
+                        <!-- 文案更新：查询进度 -->
+                        <button @click="handleQuery" class="w-full bg-oat font-bold py-3.5 rounded-2xl btn-press mt-2">
+                            查询进度
+                        </button>
+                    </div>
+
+                    <div v-if="errorMsg" class="p-4 bg-rose/10 text-rose border border-rose/20 rounded-2xl text-sm font-bold text-center">
+                        {{ errorMsg }}
+                    </div>
+
+                    <div v-if="result" class="card-soft p-5 animate-fade-in">
+                        <div class="flex items-center justify-between mb-4 border-b border-dashed border-rose pb-4">
+                            <span class="font-bold">当前状态</span>
+                            <span v-if="result.status === 'pending'" class="bg-yellow-100 text-yellow-700 text-xs px-3 py-1 rounded-full font-bold uppercase tracking-wider">审核中 PENDING</span>
+                            <span v-else-if="result.status === 'approved'" class="bg-green-100 text-green-700 text-xs px-3 py-1 rounded-full font-bold uppercase tracking-wider">已通过 APPROVED</span>
+                            <span v-else-if="result.status === 'rejected'" class="bg-red-100 text-red-700 text-xs px-3 py-1 rounded-full font-bold uppercase tracking-wider">已驳回 REJECTED</span>
+                        </div>
+                        
+                        <div class="relative pl-6 border-l-2 border-strawberry space-y-6">
+                            <div class="relative">
+                                <div class="absolute -left-[31px] top-1 w-4 h-4 bg-cream border-4 border-rose rounded-full"></div>
+                                <p class="text-sm font-bold">系统已收录演示材料</p>
+                                <p class="text-xs text-smog mt-1">{{ result.submitTime }}</p>
+                                <p class="text-xs mt-2 bg-cream p-2 rounded-lg inline-block border border-oat">查询账号: {{ result.qq }}</p>
+                            </div>
+
+                            <div class="relative" v-if="result.status !== 'pending'">
+                                <div class="absolute -left-[31px] top-1 w-4 h-4 bg-cream border-4 rounded-full" 
+                                     :class="result.status === 'approved' ? 'border-green-400' : 'border-red-400'"></div>
+                                <p class="text-sm font-bold" :class="result.status === 'approved' ? 'text-green-700' : 'text-red-700'">
+                                    {{ result.status === 'approved' ? '审核通过' : '审核被驳回' }}
+                                </p>
+                                <p class="text-xs text-smog mt-1">{{ result.updateTime }}</p>
+                                
+                                <div v-if="result.reviewedByName" class="text-xs text-gray-500 mt-1">
+                                    经办审核员: <span class="font-bold text-brown">{{ result.reviewedByName }}</span>
+                                </div>
+
+                                <p class="text-[10px] text-amber-600 bg-amber-50 p-1.5 rounded inline-block mt-1">⏳ 材料经审核后24小时自动销毁</p>
+                                
+                                <div v-if="result.reviewerComment" class="mt-3 p-3 rounded-lg border text-sm leading-relaxed" 
+                                     :class="result.status === 'approved' ? 'bg-green-50 border-green-200 text-green-800' : 'bg-red-50 border-red-200 text-red-800'">
+                                    <p class="font-bold mb-1 text-xs opacity-70">审核批语：</p>
+                                    {{ result.reviewerComment }}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `
+        };
+
+        const PageAdminAuth = {
+            setup(props, { emit }) {
+                const tab = ref('login');
+                const qq = ref('');
+                const password = ref('');
+                const inviteCode = ref('');
+                const nickname = ref('');
+                const errorMsg = ref('');
+
+                const handleLogin = () => {
+                    errorMsg.value = '';
+                    if (!qq.value || !password.value) {
+                        errorMsg.value = '请填写完整的账号密码';
+                        return;
+                    }
+                    const res = AuthService.login(qq.value.trim(), password.value);
+                    if (res.success) {
+                        emit('navigate', 'admin');
+                    } else {
+                        errorMsg.value = res.msg;
+                    }
+                };
+
+                const handleRegister = () => {
+                    errorMsg.value = '';
+                    if (!qq.value || !password.value) {
+                        errorMsg.value = '请填写完整的注册信息';
+                        return;
+                    }
+                    if (qq.value.trim() !== SUPER_ADMIN_QQ && !inviteCode.value.trim()) {
+                        errorMsg.value = '普通审核员注册必须提供激活码';
+                        return;
+                    }
+                    const res = AuthService.register(qq.value.trim(), password.value, inviteCode.value.trim(), nickname.value);
+                    if (res.success) {
+                        alert(res.user.role === 'super_admin' ? '检测到超管QQ，已直接以最高权限入驻！' : '审核员注册成功！');
+                        emit('navigate', 'admin');
+                    } else {
+                        errorMsg.value = res.msg;
+                    }
+                };
+
+                return { tab, qq, password, inviteCode, nickname, errorMsg, handleLogin, handleRegister, SUPER_ADMIN_QQ };
+            },
+            template: `
+                <div class="p-6 min-h-screen flex flex-col justify-center animate-fade-in">
+                    <button @click="$emit('navigate', 'home')" class="text-smog font-bold mb-4 self-start">← 返回大厅</button>
+                    <div class="card-soft p-6">
+                        <div class="flex border-b border-oat mb-6 pb-2 text-center font-bold">
+                            <div @click="tab='login'" :class="tab==='login'?'text-rose border-b-2 border-rose':''" class="flex-1 pb-2 cursor-pointer">审核员登录</div>
+                            <div @click="tab='register'" :class="tab==='register'?'text-rose border-b-2 border-rose':''" class="flex-1 pb-2 cursor-pointer">凭码激活注册</div>
+                        </div>
+
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-xs font-bold text-smog mb-1 pl-1">审核员 QQ 号</label>
+                                <input type="tel" v-model="qq" class="w-full input-soft px-4 py-2.5 font-mono" placeholder="请输入您的QQ号">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-smog mb-1 pl-1">管理密码</label>
+                                <input type="password" v-model="password" class="w-full input-soft px-4 py-2.5 font-mono" placeholder="请输入密码">
+                            </div>
+                            <div v-if="tab==='register'">
+                                <label class="block text-xs font-bold text-smog mb-1 pl-1">管理昵称 (选填)</label>
+                                <input type="text" v-model="nickname" class="w-full input-soft px-4 py-2.5" placeholder="例如: 薯饼小分队-阿花">
+                            </div>
+                            <div v-if="tab==='register'">
+                                <label class="block text-xs font-bold text-smog mb-1 pl-1">邀请激活码</label>
+                                <input type="text" v-model="inviteCode" class="w-full input-soft px-4 py-2.5 font-mono uppercase" placeholder="输入超管下发的激活码">
+                            </div>
+
+                            <div v-if="errorMsg" class="p-2 bg-red-50 text-red-500 rounded text-xs text-center font-bold">
+                                {{ errorMsg }}
+                            </div>
+
+                            <button v-if="tab==='login'" @click="handleLogin" class="w-full bg-strawberry font-bold py-3 rounded-xl btn-press shadow-sm text-brown mt-2">
+                                登录进入后台
+                            </button>
+                            <button v-else @click="handleRegister" class="w-full bg-rose text-white font-bold py-3 rounded-xl btn-press shadow-sm mt-2">
+                                校验激活码并完成注册
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `
+        };
+
+        const PageAdmin = {
+            setup(props, { emit }) {
+                const currentUser = ref(AuthService.getCurrentUser());
+                const applications = ref([]);
+                const currentTab = ref('tasks');
+                
+                const customCode = ref('');
+                const customTargetQQ = ref('');
+                const customTotal = ref(1);
+                const customNote = ref('');
+                const inviteList = ref([]);
+
+                const reviewersList = ref([]);
+                const directQQ = ref('');
+                const directPassword = ref('');
+                const directName = ref('');
+
+                const loadData = () => {
+                    applications.value = getAllMockApplications();
+                    if (currentUser.value?.role === 'super_admin') {
+                        inviteList.value = AuthService.getInvites();
+                        reviewersList.value = AuthService.getReviewers();
+                    }
+                };
+
+                onMounted(() => {
+                    if (!currentUser.value) {
+                        emit('navigate', 'adminAuth');
+                        return;
+                    }
+                    loadData();
+                });
+
+                const logout = () => {
+                    AuthService.logout();
+                    emit('navigate', 'home');
+                };
+
+                const editMyNickname = () => {
+                    const newName = prompt('请输入新的管理昵称：', currentUser.value.name);
+                    if (newName && newName.trim()) {
+                        AuthService.updateNickname(currentUser.value.qq, newName);
+                        currentUser.value.name = newName.trim();
+                        loadData();
+                        alert('昵称更新成功！');
+                    }
+                };
+
+                const generateCustomInvite = () => {
+                    if (!customCode.value.trim()) return alert('请输入激活码名称');
+                    const codeUpper = customCode.value.trim().toUpperCase();
+                    const list = AuthService.getInvites();
+                    if (list.some(i => i.code === codeUpper)) return alert('该激活码已存在');
+
+                    list.unshift({
+                        code: codeUpper,
+                        targetQQ: customTargetQQ.value.trim(),
+                        total: parseInt(customTotal.value) || 1,
+                        used: 0,
+                        usedBy: [],
+                        note: customNote.value.trim() || '无备注',
+                        createdAt: new Date().toLocaleDateString()
+                    });
+                    AuthService.saveInvites(list);
+                    inviteList.value = list;
+                    customCode.value = '';
+                    customTargetQQ.value = '';
+                    customNote.value = '';
+                    customTotal.value = 1;
+                    alert('新激活码已下发生效！');
+                };
+
+                const removeInvite = (code) => {
+                    if (!confirm(`确认销毁激活码 ${code} 吗？`)) return;
+                    let list = AuthService.getInvites();
+                    list = list.filter(i => i.code !== code);
+                    AuthService.saveInvites(list);
+                    inviteList.value = list;
+                };
+
+                const addReviewerDirect = () => {
+                    if (!directQQ.value.trim() || !directPassword.value.trim()) return alert('请完整填写信息');
+                    const list = AuthService.getReviewers();
+                    if (list.some(r => r.qq === directQQ.value.trim())) return alert('该QQ号已存在');
+
+                    list.push({
+                        qq: directQQ.value.trim(),
+                        password: directPassword.value.trim(),
+                        role: directQQ.value.trim() === SUPER_ADMIN_QQ ? 'super_admin' : 'reviewer',
+                        name: directName.value.trim() || `审核员_${directQQ.value.trim().slice(-4)}`,
+                        status: 'active',
+                        createdAt: new Date().toLocaleString()
+                    });
+                    AuthService.saveReviewers(list);
+                    reviewersList.value = list;
+                    directQQ.value = '';
+                    directPassword.value = '';
+                    directName.value = '';
+                    alert('已直接录入审核员');
+                };
+
+                const toggleMemberStatus = (target) => {
+                    if (target.qq === SUPER_ADMIN_QQ) return alert('无法禁用最高管理员');
+                    let list = AuthService.getReviewers();
+                    const idx = list.findIndex(r => r.qq === target.qq);
+                    if (idx !== -1) {
+                        list[idx].status = list[idx].status === 'active' ? 'banned' : 'active';
+                        AuthService.saveReviewers(list);
+                        reviewersList.value = list;
+                    }
+                };
+
+                const resetMemberPassword = (target) => {
+                    const newPwd = prompt(`请输入为 [${target.qq}] 重置的新密码:`);
+                    if (!newPwd) return;
+                    let list = AuthService.getReviewers();
+                    const idx = list.findIndex(r => r.qq === target.qq);
+                    if (idx !== -1) {
+                        list[idx].password = newPwd.trim();
+                        AuthService.saveReviewers(list);
+                        reviewersList.value = list;
+                        alert('密码修改完成');
+                    }
+                };
+
+                const deleteMember = (target) => {
+                    if (target.qq === SUPER_ADMIN_QQ) return alert('无法删除超级管理员');
+                    if (!confirm(`确认彻底移除审核员 [${target.qq}] 吗？`)) return;
+                    let list = AuthService.getReviewers();
+                    list = list.filter(r => r.qq !== target.qq);
+                    AuthService.saveReviewers(list);
+                    reviewersList.value = list;
+                };
+
+                const clearAllAuditData = () => {
+                    if (!confirm('确定要清空所有审核记录吗？此操作不可逆！')) return;
+                    localStorage.removeItem(STORAGE_KEY);
+                    applications.value = [];
+                    alert('全站申请已彻底重置');
+                };
+
+                const forcePurgeAllExpired = () => {
+                    const before = applications.value.length;
+                    const afterList = pruneExpiredApplications();
+                    applications.value = afterList.reverse();
+                    alert(`执行完毕，已清除 ${before - applications.value.length} 条过期记录`);
+                };
+
+                return { 
+                    currentUser, applications, currentTab, inviteList, reviewersList,
+                    customCode, customTargetQQ, customTotal, customNote, directQQ, directPassword, directName,
+                    logout, editMyNickname, generateCustomInvite, removeInvite, addReviewerDirect,
+                    toggleMemberStatus, resetMemberPassword, deleteMember, clearAllAuditData, forcePurgeAllExpired
+                };
+            },
+            template: `
+                <div class="bg-gray-50 min-h-screen text-gray-800 absolute inset-0 z-50 overflow-y-auto font-sans pb-12">
+                    <div class="bg-white border-b px-4 py-3 flex justify-between items-center sticky top-0 z-10 shadow-sm">
+                        <div class="flex items-center gap-2">
+                            <button @click="$emit('navigate', 'home')" class="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-2.5 py-1 rounded font-bold transition">
+                                🏠 返回首页
+                            </button>
+                            <div>
+                                <div class="flex items-center gap-1.5">
+                                    <span class="font-bold text-xs">{{ currentUser?.name }}</span>
+                                    <button @click="editMyNickname" class="text-[10px] text-blue-500 hover:underline">✎改名</button>
+                                </div>
+                                <div class="text-[9px] text-gray-400 font-mono">
+                                    <span :class="currentUser?.role==='super_admin'?'text-rose font-bold':'text-blue-600'">{{ currentUser?.role==='super_admin' ? '最高管理员' : '普通审核员' }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <button @click="logout" class="text-xs text-red-500 bg-red-50 border border-red-200 px-2.5 py-1 rounded">退出登录</button>
+                    </div>
+
+                    <div v-if="currentUser?.role === 'super_admin'" class="grid grid-cols-4 bg-white border-b text-[11px] font-bold text-center">
+                        <div @click="currentTab='tasks'" :class="currentTab==='tasks'?'border-b-2 border-rose text-rose':''" class="py-2.5 cursor-pointer">
+                            任务队列
+                        </div>
+                        <div @click="currentTab='invites'" :class="currentTab==='invites'?'border-b-2 border-rose text-rose':''" class="py-2.5 cursor-pointer">
+                            激活码签发
+                        </div>
+                        <div @click="currentTab='members'" :class="currentTab==='members'?'border-b-2 border-rose text-rose':''" class="py-2.5 cursor-pointer">
+                            成员批改
+                        </div>
+                        <div @click="currentTab='system'" :class="currentTab==='system'?'border-b-2 border-rose text-rose':''" class="py-2.5 cursor-pointer">
+                            全域控制
+                        </div>
+                    </div>
+
+                    <div v-if="currentTab === 'tasks'" class="p-4 animate-fade-in">
+                        <div class="grid grid-cols-2 gap-3 mb-6">
+                            <div class="bg-white p-4 rounded-xl border shadow-sm">
+                                <div class="text-2xl font-bold text-blue-600">{{ applications.filter(a => a.status === 'pending').length }}</div>
+                                <div class="text-xs text-gray-500">待处理队列</div>
+                            </div>
+                            <div class="bg-white p-4 rounded-xl border shadow-sm">
+                                <div class="text-2xl font-bold text-green-600">{{ applications.filter(a => a.status === 'approved').length }}</div>
+                                <div class="text-xs text-gray-500">已通过 (24h销毁)</div>
+                            </div>
+                        </div>
+
+                        <h3 class="font-bold text-sm mb-3 text-gray-800">最新材料任务</h3>
+                        <div v-if="applications.length === 0" class="text-center text-sm text-gray-400 py-10">
+                            暂无提交的申请记录
+                        </div>
+                        <div class="space-y-3" v-else>
+                            <div class="bg-white border rounded-xl p-4 shadow-sm" v-for="app in applications" :key="app.qq">
+                                <div class="flex justify-between items-start mb-2">
+                                    <span class="font-mono text-xs font-bold text-gray-700">QQ: {{ app.qq }}</span>
+                                    <span v-if="app.status === 'pending'" class="text-[10px] bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded font-bold">待审核</span>
+                                    <span v-else-if="app.status === 'approved'" class="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded font-bold">已通过</span>
+                                    <span v-else class="text-[10px] bg-red-100 text-red-700 px-2 py-0.5 rounded font-bold">已驳回</span>
+                                </div>
+                                <div class="flex gap-2 mb-2">
+                                    <span class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">{{ app.device === 'ios' ? 'iOS' : 'Android' }}</span>
+                                    <span class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">{{ (app.fileList?.length || (app.fileUrl ? 1 : 0)) }} 份视觉材料</span>
+                                    <span class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">{{ app.audioUrl ? '含语音' : '无语音' }}</span>
+                                </div>
+                                <div class="text-[10px] text-gray-400 mb-1">{{ app.submitTime }}</div>
+                                <div v-if="app.reviewedByName" class="text-[10px] text-gray-500 mb-2">
+                                    经办审核员: <span class="font-bold text-gray-700">{{ app.reviewedByName }}</span>
+                                </div>
+                                
+                                <button @click="$emit('navigate', 'adminDetail', { qq: app.qq })" 
+                                        class="w-full text-sm py-2 rounded-lg font-medium transition"
+                                        :class="app.status === 'pending' ? 'bg-blue-50 text-blue-600 font-bold' : 'bg-gray-100 text-gray-600'">
+                                    {{ app.status === 'pending' ? '进入审核与批语' : '查看详情及结果' }}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-if="currentTab === 'invites'" class="p-4 space-y-4 animate-fade-in">
+                        <div class="bg-white p-4 rounded-xl border shadow-sm">
+                            <h4 class="font-bold text-xs mb-3 text-gray-800 border-b pb-2">🎟️ 签发与定向派送激活码</h4>
+                            <div class="space-y-3">
+                                <div>
+                                    <label class="block text-[10px] font-bold text-gray-500 mb-1">自定义激活码字符</label>
+                                    <input type="text" v-model="customCode" placeholder="如: VIP_POTATO, MINT_88" class="w-full border rounded px-3 py-2 text-xs font-mono uppercase">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] font-bold text-rose mb-1">限定指定 QQ 号使用 (选填，留空为公开码)</label>
+                                    <input type="tel" v-model="customTargetQQ" placeholder="填写目标QQ号，其他QQ将无法凭此码激活" class="w-full border rounded px-3 py-2 text-xs font-mono">
+                                </div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <label class="block text-[10px] font-bold text-gray-500 mb-1">可用名额上限</label>
+                                        <input type="number" v-model="customTotal" min="1" class="w-full border rounded px-3 py-2 text-xs font-mono">
+                                    </div>
+                                    <div>
+                                        <label class="block text-[10px] font-bold text-gray-500 mb-1">发放备注/归属人</label>
+                                        <input type="text" v-model="customNote" placeholder="例如: 派发给小李" class="w-full border rounded px-3 py-2 text-xs">
+                                    </div>
+                                </div>
+                                <button @click="generateCustomInvite" class="w-full bg-rose text-white font-bold py-2.5 rounded-lg text-xs shadow-sm">
+                                    立即发布该激活码
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="bg-white p-4 rounded-xl border shadow-sm">
+                            <h4 class="font-bold text-xs mb-3 text-gray-800 border-b pb-2">📋 现存有效激活码池</h4>
+                            <div class="space-y-3">
+                                <div v-for="item in inviteList" :key="item.code" class="p-3 bg-gray-50 rounded-lg border border-gray-200 text-xs">
+                                    <div class="flex justify-between items-center mb-1">
+                                        <span class="font-mono font-bold text-sm text-rose">{{ item.code }}</span>
+                                        <button @click="removeInvite(item.code)" class="text-red-500 text-[10px] hover:underline">作废</button>
+                                    </div>
+                                    <div class="text-[11px] text-gray-600 mb-1">
+                                        限定账号: <span class="font-mono font-bold" :class="item.targetQQ?'text-rose':'text-gray-400'">{{ item.targetQQ ? item.targetQQ : '不限制 (公开码)' }}</span>
+                                    </div>
+                                    <div class="text-[11px] text-gray-500 mb-2">额度: {{ item.used }} / {{ item.total }} ({{ item.note }})</div>
+                                    <div v-if="item.usedBy && item.usedBy.length > 0" class="text-[10px] text-gray-400 bg-white p-2 rounded border">
+                                        <span class="font-bold text-gray-600">已激活人员:</span>
+                                        <span v-for="u in item.usedBy" :key="u.qq" class="ml-1 inline-block">QQ:{{ u.qq }};</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-if="currentTab === 'members'" class="p-4 space-y-4 animate-fade-in">
+                        <div class="bg-white p-4 rounded-xl border shadow-sm">
+                            <h4 class="font-bold text-xs mb-3 text-gray-800 border-b pb-2">➕ 手工直签审核员</h4>
+                            <div class="space-y-2">
+                                <input type="tel" v-model="directQQ" placeholder="审核员 QQ 号" class="w-full border rounded px-3 py-2 text-xs">
+                                <input type="text" v-model="directPassword" placeholder="登录初始密码" class="w-full border rounded px-3 py-2 text-xs">
+                                <input type="text" v-model="directName" placeholder="管理昵称/代号" class="w-full border rounded px-3 py-2 text-xs">
+                                <button @click="addReviewerDirect" class="w-full bg-blue-600 text-white font-bold py-2 rounded text-xs">
+                                    赋予资格并入库
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="bg-white p-4 rounded-xl border shadow-sm">
+                            <h4 class="font-bold text-xs mb-3 text-gray-800 border-b pb-2">👥 审核团队花名册与控制</h4>
+                            <div class="space-y-3">
+                                <div v-for="member in reviewersList" :key="member.qq" class="border-b pb-3">
+                                    <div class="flex justify-between items-start">
+                                        <div>
+                                            <div class="font-bold text-xs font-mono">
+                                                {{ member.qq }} ({{ member.name }})
+                                                <span v-if="member.qq === '703608437'" class="text-[9px] bg-rose text-white px-1.5 py-0.5 rounded font-bold ml-1">超管</span>
+                                            </div>
+                                            <div class="text-[10px] text-gray-400 mt-0.5">密码: {{ member.password }} | 状态: <span :class="member.status==='active'?'text-green-600':'text-red-600 font-bold'">{{ member.status==='active'?'正常':'已封禁' }}</span></div>
+                                        </div>
+                                        <div class="flex gap-2" v-if="member.qq !== '703608437'">
+                                            <button @click="resetMemberPassword(member)" class="text-blue-500 text-[10px] hover:underline">重设密码</button>
+                                            <button @click="toggleMemberStatus(member)" class="text-[10px] hover:underline" :class="member.status==='active'?'text-amber-500':'text-green-500'">
+                                                {{ member.status==='active'?'停用':'解封' }}
+                                            </button>
+                                            <button @click="deleteMember(member)" class="text-red-500 text-[10px] hover:underline">剔除</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-if="currentTab === 'system'" class="p-4 space-y-4 animate-fade-in">
+                        <div class="bg-white p-4 rounded-xl border shadow-sm">
+                            <h4 class="font-bold text-xs mb-3 text-gray-800 border-b pb-2">🛡️ 存储与销毁机制调度</h4>
+                            <div class="space-y-3 text-xs">
+                                <div class="flex justify-between items-center p-2 bg-gray-50 rounded border">
+                                    <div>
+                                        <div class="font-bold">强制执行过期单销毁</div>
+                                        <div class="text-[10px] text-gray-400">清理审批通过/驳回超24小时的材料</div>
+                                    </div>
+                                    <button @click="forcePurgeAllExpired" class="bg-gray-800 text-white px-3 py-1.5 rounded text-[11px]">立即执行</button>
+                                </div>
+
+                                <div class="flex justify-between items-center p-2 bg-red-50 rounded border border-red-200">
+                                    <div>
+                                        <div class="font-bold text-red-600">重置清空全站审核流</div>
+                                        <div class="text-[10px] text-red-400">一键清空用户所提交的全部材料单据</div>
+                                    </div>
+                                    <button @click="clearAllAuditData" class="bg-red-600 text-white px-3 py-1.5 rounded text-[11px] font-bold">全量清空</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `
+        };
+
+        // --- 审核详情处理页（多图查看 + 常用语编辑修改） ---
+        const PageAdminDetail = {
+            props: ['routeParams'],
+            setup(props, { emit }) {
+                const currentUser = ref(AuthService.getCurrentUser());
+                const appData = ref(null);
+                const comment = ref('');
+                const quickList = ref([]);
+                const newQuickText = ref('');
+                
+                // 灯箱缩放平移
+                const lightboxUrl = ref('');
+                const scale = ref(1);
+                const translateX = ref(0);
+                const translateY = ref(0);
+                let initialDistance = 0;
+                let initialScale = 1;
+                let startTouchX = 0;
+                let startTouchY = 0;
+                let lastTranslateX = 0;
+                let lastTranslateY = 0;
+
+                onMounted(() => {
+                    if (!currentUser.value) {
+                        emit('navigate', 'adminAuth');
+                        return;
+                    }
+                    appData.value = getMockApplication(props.routeParams.qq);
+                    if (appData.value) {
+                        comment.value = appData.value.reviewerComment || '';
+                    }
+                    quickList.value = AuthService.getQuickComments();
+                });
+
+                // 获取多图或单图列表
+                const getImages = computed(() => {
+                    if (!appData.value) return [];
+                    if (appData.value.fileList && appData.value.fileList.length > 0) {
+                        return appData.value.fileList;
+                    }
+                    if (appData.value.fileUrl) {
+                        return [{ url: appData.value.fileUrl, type: appData.value.fileType || 'image' }];
+                    }
+                    return [];
+                });
+
+                const appendComment = (text) => {
+                    if (comment.value && !comment.value.endsWith(' ') && !comment.value.endsWith('\n')) {
+                        comment.value += ' ' + text;
+                    } else {
+                        comment.value += text;
+                    }
+                };
+
+                const addNewQuickComment = () => {
+                    if (!newQuickText.value.trim()) return;
+                    const text = newQuickText.value.trim();
+                    if (!quickList.value.includes(text)) {
+                        quickList.value.push(text);
+                        AuthService.saveQuickComments(quickList.value);
+                    }
+                    newQuickText.value = '';
+                };
+
+                // 支持修改常用语
+                const editQuickComment = (index) => {
+                    const oldText = quickList.value[index];
+                    const modified = prompt('修改常用批语内容：', oldText);
+                    if (modified !== null && modified.trim() !== '') {
+                        quickList.value[index] = modified.trim();
+                        AuthService.saveQuickComments(quickList.value);
+                    }
+                };
+
+                // 支持删除常用语
+                const removeQuickComment = (index) => {
+                    if (!confirm('确认删除此常用语吗？')) return;
+                    quickList.value.splice(index, 1);
+                    AuthService.saveQuickComments(quickList.value);
+                };
+
+                const handleAction = (status) => {
+                    if (!appData.value) return;
+                    updateMockApplicationStatus(
+                        appData.value.qq, 
+                        status, 
+                        comment.value.trim(), 
+                        currentUser.value.qq, 
+                        currentUser.value.name
+                    );
+                    alert(`审批完成！状态已变更为：${status === 'approved' ? '已通过' : '已驳回'}`);
+                    emit('navigate', 'admin');
+                };
+
+                const forceDeleteApplication = () => {
+                    if (!confirm('超管特权：确认立刻彻底销毁该申请单及其所有材料？')) return;
+                    deleteMockApplicationPermanently(appData.value.qq);
+                    alert('已抹除此条记录');
+                    emit('navigate', 'admin');
+                };
+
+                const openLightbox = (url) => {
+                    lightboxUrl.value = url;
+                    scale.value = 1;
+                    translateX.value = 0;
+                    translateY.value = 0;
+                };
+
+                const closeLightbox = () => {
+                    lightboxUrl.value = '';
+                };
+
+                const zoomIn = (e) => {
+                    e?.stopPropagation();
+                    scale.value = Math.min(scale.value + 0.5, 5);
+                };
+
+                const zoomOut = (e) => {
+                    e?.stopPropagation();
+                    scale.value = Math.max(scale.value - 0.5, 0.5);
+                };
+
+                const resetZoom = (e) => {
+                    e?.stopPropagation();
+                    scale.value = 1;
+                    translateX.value = 0;
+                    translateY.value = 0;
+                };
+
+                const onTouchStart = (e) => {
+                    if (e.touches.length === 2) {
+                        initialDistance = Math.hypot(
+                            e.touches[0].clientX - e.touches[1].clientX,
+                            e.touches[0].clientY - e.touches[1].clientY
+                        );
+                        initialScale = scale.value;
+                    } else if (e.touches.length === 1) {
+                        startTouchX = e.touches[0].clientX;
+                        startTouchY = e.touches[0].clientY;
+                        lastTranslateX = translateX.value;
+                        lastTranslateY = translateY.value;
+                    }
+                };
+
+                const onTouchMove = (e) => {
+                    if (e.touches.length === 2) {
+                        const currentDistance = Math.hypot(
+                            e.touches[0].clientX - e.touches[1].clientX,
+                            e.touches[0].clientY - e.touches[1].clientY
+                        );
+                        if (initialDistance > 0) {
+                            const newScale = initialScale * (currentDistance / initialDistance);
+                            scale.value = Math.min(Math.max(newScale, 0.5), 6);
+                        }
+                    } else if (e.touches.length === 1 && scale.value > 1) {
+                        const deltaX = e.touches[0].clientX - startTouchX;
+                        const deltaY = e.touches[0].clientY - startTouchY;
+                        translateX.value = lastTranslateX + deltaX;
+                        translateY.value = lastTranslateY + deltaY;
+                    }
+                };
+
+                const onTouchEnd = (e) => {
+                    if (e.touches.length < 2) {
+                        initialDistance = 0;
+                    }
+                };
+
+                return { 
+                    currentUser, appData, comment, quickList, newQuickText, getImages, lightboxUrl, 
+                    scale, translateX, translateY, appendComment, addNewQuickComment, editQuickComment, removeQuickComment,
+                    handleAction, forceDeleteApplication, openLightbox, closeLightbox,
+                    zoomIn, zoomOut, resetZoom, onTouchStart, onTouchMove, onTouchEnd 
+                };
+            },
+            template: `
+                <div class="bg-gray-50 min-h-screen text-gray-800 absolute inset-0 z-50 overflow-y-auto font-sans">
+                    <div class="bg-white border-b px-4 py-3 flex justify-between items-center sticky top-0 z-10 shadow-sm">
+                        <div class="flex items-center gap-2">
+                            <button @click="$emit('navigate', 'admin')" class="font-bold text-xs text-blue-600">← 返回工作台</button>
+                            <button @click="$emit('navigate', 'home')" class="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-0.5 rounded font-bold transition">🏠 首页</button>
+                        </div>
+                        <div class="text-xs text-gray-500 font-mono">档案: {{ routeParams.qq }}</div>
+                    </div>
+
+                    <div v-if="!appData" class="p-6 text-center text-gray-500">档案不存在或已过期销毁</div>
+                    
+                    <div v-else class="p-4 space-y-4">
+                        <div class="bg-white p-4 rounded-xl border shadow-sm">
+                            <h3 class="font-bold text-sm mb-3 border-b pb-2">基础报备信息</h3>
+                            <div class="space-y-2 text-sm">
+                                <div class="flex justify-between"><span class="text-gray-500">申请 QQ:</span> <span class="font-bold">{{ appData.qq }}</span></div>
+                                <div class="flex justify-between"><span class="text-gray-500">设备系统:</span> <span>{{ appData.device === 'ios' ? 'iOS (录屏)' : 'Android (截屏)' }}</span></div>
+                                <div class="flex justify-between"><span class="text-gray-500">提交时间:</span> <span class="text-xs">{{ appData.submitTime }}</span></div>
+                                <div v-if="appData.reviewedByName" class="flex justify-between"><span class="text-gray-500">经办审核员:</span> <span class="text-xs font-bold text-blue-600">{{ appData.reviewedByName }}</span></div>
+                            </div>
+                        </div>
+
+                        <!-- 视觉材料展示（多图平铺展示并支持双指缩放） -->
+                        <div class="bg-white p-4 rounded-xl border shadow-sm">
+                            <div class="flex justify-between items-center mb-3 border-b pb-2">
+                                <h3 class="font-bold text-sm">身份材料展示 ({{ getImages.length }} 份)</h3>
+                                <span class="text-[10px] text-blue-500">点击任意图片可放大查看</span>
+                            </div>
+                            <div v-if="getImages.length > 0" class="space-y-3">
+                                <div v-for="(img, idx) in getImages" :key="idx" class="bg-gray-100 rounded-lg p-2 text-center border">
+                                    <div class="text-[10px] text-gray-400 mb-1 text-left">材料 #{{ idx + 1 }}</div>
+                                    <img v-if="img.type === 'image'" 
+                                         :src="img.url" 
+                                         @click="openLightbox(img.url)"
+                                         class="max-h-[260px] mx-auto rounded shadow-sm cursor-zoom-in active:opacity-80 transition">
+                                    <video v-else-if="img.type === 'video'" :src="img.url" controls class="max-h-[260px] w-full mx-auto rounded shadow-sm"></video>
+                                </div>
+                            </div>
+                            <div v-else class="text-sm text-red-500 bg-red-50 p-2 rounded">未提交视觉材料</div>
+                        </div>
+
+                        <div class="bg-white p-4 rounded-xl border shadow-sm">
+                            <h3 class="font-bold text-sm mb-3 border-b pb-2">语音原声核验</h3>
+                            <div v-if="appData.audioUrl" class="bg-gray-100 rounded-lg p-3">
+                                <audio :src="appData.audioUrl" controls class="w-full"></audio>
+                            </div>
+                            <div v-else class="text-sm text-red-500 bg-red-50 p-2 rounded">未提交录音条</div>
+                        </div>
+
+                        <!-- 常用语支持点击填入、修改、删除 -->
+                        <div class="bg-white p-4 rounded-xl border shadow-sm mb-4">
+                            <div class="flex justify-between items-center mb-2">
+                                <h3 class="font-bold text-sm">批注与裁决</h3>
+                                <span class="text-[10px] text-gray-400">经手审核员: {{ currentUser.name }}</span>
+                            </div>
+
+                            <div class="mb-3">
+                                <div class="text-[11px] font-bold text-gray-500 mb-1.5 flex items-center justify-between">
+                                    <span>快捷批语 (点击填入 / ✎修改 / ✕删除):</span>
+                                </div>
+                                <div class="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                                    <div v-for="(item, idx) in quickList" :key="idx" 
+                                         class="text-xs bg-gray-100 hover:bg-rose/20 border rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2">
+                                        <span @click="appendComment(item)" class="flex-1 cursor-pointer truncate text-brown font-medium" :title="item">
+                                            {{ item }}
+                                        </span>
+                                        <div class="flex items-center gap-1.5 shrink-0">
+                                            <button @click="editQuickComment(idx)" class="text-blue-500 hover:underline text-[10px]">✎改</button>
+                                            <button @click="removeQuickComment(idx)" class="text-red-500 hover:underline text-[10px]">✕删</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 mt-2">
+                                    <input type="text" v-model="newQuickText" placeholder="新增常用快捷批语..." class="flex-1 border rounded px-2.5 py-1.5 text-xs">
+                                    <button @click="addNewQuickComment" class="bg-gray-800 text-white text-xs px-3 py-1.5 rounded font-bold">添加</button>
+                                </div>
+                            </div>
+
+                            <textarea v-model="comment" rows="3" class="w-full border rounded-lg p-3 text-sm focus:outline-none focus:border-blue-400 mb-4" placeholder="填写或点击快捷批语填入内容，用户查询时即刻显示。"></textarea>
+                            
+                            <div class="flex gap-3">
+                                <button @click="handleAction('rejected')" class="flex-1 bg-red-50 border border-red-200 text-red-600 font-bold py-3 rounded-xl active:bg-red-100">
+                                    驳回申请
+                                </button>
+                                <button @click="handleAction('approved')" class="flex-1 bg-green-500 text-white font-bold py-3 rounded-xl shadow-md active:bg-green-600">
+                                    批准通过
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="currentUser?.role === 'super_admin'" class="pb-10">
+                            <button @click="forceDeleteApplication" class="w-full bg-gray-200 text-gray-700 py-3 rounded-xl text-xs font-bold border border-gray-300">
+                                🗑️ 超管特权：直接抹除此审核档案
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 全屏手势缩放灯箱 -->
+                    <div v-if="lightboxUrl" 
+                         @click="closeLightbox" 
+                         class="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center overflow-hidden animate-fade-in touch-none">
+                        
+                        <div class="fixed top-4 right-4 z-[110] flex items-center gap-2" @click.stop>
+                            <button @click="zoomIn" class="w-8 h-8 rounded-full bg-white/20 text-white text-base font-bold flex items-center justify-center active:bg-white/40">＋</button>
+                            <button @click="zoomOut" class="w-8 h-8 rounded-full bg-white/20 text-white text-base font-bold flex items-center justify-center active:bg-white/40">－</button>
+                            <button @click="resetZoom" class="px-2.5 py-1 rounded-full bg-white/20 text-white text-xs font-bold active:bg-white/40">重置</button>
+                            <button @click="closeLightbox" class="px-2.5 py-1 rounded-full bg-red-500/80 text-white text-xs font-bold active:bg-red-600">关闭</button>
+                        </div>
+
+                        <div class="w-full h-full flex items-center justify-center"
+                             @touchstart="onTouchStart" 
+                             @touchmove="onTouchMove" 
+                             @touchend="onTouchEnd">
+                            <img :src="lightboxUrl" 
+                                 @click.stop
+                                 class="zoom-target max-w-[95%] max-h-[85%] object-contain rounded"
+                                 :style="{ transform: 'translate(' + translateX + 'px, ' + translateY + 'px) scale(' + scale + ')' }">
+                        </div>
+                        
+                        <div class="fixed bottom-6 text-white/60 text-xs text-center pointer-events-none w-full">
+                            可直接双指捏合缩放 / 拖拽查看细节
+                        </div>
+                    </div>
+                </div>
+            `
+        };
+
+        createApp({
+            data() {
+                return {
+                    currentPage: 'home',
+                    routeParams: {}
+                }
+            },
+            computed: {
+                currentPageComponent() {
+                    const map = {
+                        'home': PageHome,
+                        'requirements': PageRequirements,
+                        'submit': PageSubmit,
+                        'success': PageSuccess,
+                        'query': PageQuery,
+                        'adminAuth': PageAdminAuth,
+                        'admin': PageAdmin,
+                        'adminDetail': PageAdminDetail
+                    };
+                    return map[this.currentPage] || PageHome;
+                }
+            },
+            methods: {
+                navigate(page, params = {}) {
+                    this.routeParams = params;
+                    this.currentPage = page;
+                    window.scrollTo(0, 0);
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
